@@ -1,0 +1,105 @@
+schemaVersion: '0.3'
+description: >-
+  Restore the latest GitLab backup into a throwaway stack, assert a clone
+  succeeds, then tear it down. Scheduled so the restore path is exercised on a
+  known cadence rather than discovered during an incident.
+assumeRole: '{{ AutomationAssumeRole }}'
+
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: Role Systems Manager assumes to run this document.
+  BackupBucket:
+    type: String
+    description: Bucket holding gitlab-backup archives.
+  AmiId:
+    type: String
+    description: Baked GitLab AMI to restore onto.
+  SubnetId:
+    type: String
+  SecurityGroupId:
+    type: String
+  InstanceProfile:
+    type: String
+  NotificationTopic:
+    type: String
+    description: SNS topic that receives the drill result.
+
+mainSteps:
+  - name: LaunchDrillInstance
+    action: aws:runInstances
+    timeoutSeconds: 900
+    inputs:
+      ImageId: '{{ AmiId }}'
+      InstanceType: m6i.xlarge
+      MinInstanceCount: 1
+      MaxInstanceCount: 1
+      SubnetId: '{{ SubnetId }}'
+      SecurityGroupIds:
+        - '{{ SecurityGroupId }}'
+      IamInstanceProfileName: '{{ InstanceProfile }}'
+      TagSpecifications:
+        - ResourceType: instance
+          Tags:
+            - Key: Name
+              Value: gitlab-restore-drill
+            - Key: Ephemeral
+              Value: 'true'
+
+  - name: RestoreBackup
+    action: aws:runCommand
+    timeoutSeconds: 5400
+    onFailure: 'step:PublishResult'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      InstanceIds:
+        - '{{ LaunchDrillInstance.InstanceIds }}'
+      Parameters:
+        commands:
+          - set -euo pipefail
+          - LATEST=$(aws s3 ls s3://{{ BackupBucket }}/ | sort | tail -1 | awk '{print $4}')
+          - test -n "$LATEST"
+          - aws s3 cp "s3://{{ BackupBucket }}/$LATEST" /var/opt/gitlab/backups/
+          - chown git:git /var/opt/gitlab/backups/"$LATEST"
+          - gitlab-ctl stop puma
+          - gitlab-ctl stop sidekiq
+          - gitlab-backup restore force=yes BACKUP="${LATEST%%_gitlab_backup.tar}"
+          - gitlab-ctl reconfigure
+          - gitlab-ctl restart
+          - gitlab-rake gitlab:check SANITIZE=true
+
+  - name: VerifyCloneWorks
+    action: aws:runCommand
+    timeoutSeconds: 600
+    onFailure: 'step:PublishResult'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      InstanceIds:
+        - '{{ LaunchDrillInstance.InstanceIds }}'
+      Parameters:
+        commands:
+          - set -euo pipefail
+          - gitlab-rake gitlab:git:fsck
+          - PROJECT=$(gitlab-rails runner "puts Project.first&.full_path")
+          - test -n "$PROJECT"
+          - git clone "http://localhost/$PROJECT.git" /tmp/drill-clone
+          - test -d /tmp/drill-clone/.git
+
+  - name: TerminateDrillInstance
+    action: aws:changeInstanceState
+    onFailure: Continue
+    inputs:
+      InstanceIds:
+        - '{{ LaunchDrillInstance.InstanceIds }}'
+      DesiredState: terminated
+
+  - name: PublishResult
+    action: aws:executeAwsApi
+    inputs:
+      Service: sns
+      Api: Publish
+      TopicArn: '{{ NotificationTopic }}'
+      Subject: GitLab restore drill finished
+      Message: >-
+        Restore drill completed for backup bucket {{ BackupBucket }}. Check the
+        automation execution for step-level results.
