@@ -30,7 +30,7 @@ variable "db_instance_id" {
 }
 
 variable "canary_name" {
-  description = "Synthetics canary running the git clone check."
+  description = "Synthetics canary running the git protocol check."
   type        = string
 }
 
@@ -46,12 +46,12 @@ variable "tags" {
   default     = {}
 }
 
-resource "aws_cloudwatch_metric_alarm" "clone_failing" {
-  alarm_name          = "gitlab-git-clone-failing"
+resource "aws_cloudwatch_metric_alarm" "protocol_failing" {
+  alarm_name          = "gitlab-git-protocol-failing"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
   threshold           = 100
-  alarm_description   = "Synthetics canary could not clone a repository"
+  alarm_description   = "Canary could not fetch the git reference advertisement"
   alarm_actions       = [var.alarm_topic_arn]
   ok_actions          = [var.alarm_topic_arn]
   treat_missing_data  = "breaching"
@@ -106,18 +106,18 @@ resource "aws_cloudwatch_metric_alarm" "sidekiq_backlog" {
 
 resource "aws_cloudwatch_metric_alarm" "repo_disk_filling" {
   alarm_name          = "gitlab-repository-disk-low"
-  comparison_operator = "LessThanThreshold"
+  comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
-  threshold           = 15
-  alarm_description   = "Free space on the repository volume, a routine cause of full outages"
+  threshold           = 85
+  alarm_description   = "Repository volume filling, a routine cause of full outages"
   alarm_actions       = [var.alarm_topic_arn]
   treat_missing_data  = "breaching"
   tags                = var.tags
 
-  metric_name = "disk_free_percent"
+  metric_name = "disk_used_percent"
   namespace   = "CWAgent"
   period      = 300
-  statistic   = "Minimum"
+  statistic   = "Maximum"
 }
 
 resource "aws_cloudwatch_metric_alarm" "database_connections" {
@@ -140,7 +140,7 @@ resource "aws_cloudwatch_metric_alarm" "database_connections" {
   }
 }
 
-# Pages only when the clone check fails and the fleet is unhealthy, which keeps a single failed probe quiet.
+# Pages only when git is failing and the fleet is unhealthy, so a single failed probe stays quiet.
 resource "aws_cloudwatch_composite_alarm" "service_down" {
   alarm_name        = "gitlab-service-down"
   alarm_description = "Git is unusable and the fleet is not serving"
@@ -148,7 +148,7 @@ resource "aws_cloudwatch_composite_alarm" "service_down" {
   tags              = var.tags
 
   alarm_rule = join(" AND ", [
-    "ALARM(${aws_cloudwatch_metric_alarm.clone_failing.alarm_name})",
+    "ALARM(${aws_cloudwatch_metric_alarm.protocol_failing.alarm_name})",
     "ALARM(${aws_cloudwatch_metric_alarm.no_healthy_hosts.alarm_name})",
   ])
 }
@@ -156,7 +156,7 @@ resource "aws_cloudwatch_composite_alarm" "service_down" {
 output "alarm_names" {
   description = "Alarms created, for wiring into a dashboard."
   value = [
-    aws_cloudwatch_metric_alarm.clone_failing.alarm_name,
+    aws_cloudwatch_metric_alarm.protocol_failing.alarm_name,
     aws_cloudwatch_metric_alarm.no_healthy_hosts.alarm_name,
     aws_cloudwatch_metric_alarm.sidekiq_backlog.alarm_name,
     aws_cloudwatch_metric_alarm.repo_disk_filling.alarm_name,

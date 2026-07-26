@@ -49,7 +49,7 @@ mainSteps:
   - name: RestoreBackup
     action: aws:runCommand
     timeoutSeconds: 5400
-    onFailure: 'step:PublishResult'
+    onFailure: 'step:TerminateDrillInstance'
     inputs:
       DocumentName: AWS-RunShellScript
       InstanceIds:
@@ -68,10 +68,10 @@ mainSteps:
           - gitlab-ctl restart
           - gitlab-rake gitlab:check SANITIZE=true
 
-  - name: VerifyCloneWorks
+  - name: VerifyGitWorks
     action: aws:runCommand
     timeoutSeconds: 600
-    onFailure: 'step:PublishResult'
+    onFailure: 'step:TerminateDrillInstance'
     inputs:
       DocumentName: AWS-RunShellScript
       InstanceIds:
