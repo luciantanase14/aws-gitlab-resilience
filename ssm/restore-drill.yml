@@ -1,8 +1,14 @@
 schemaVersion: '0.3'
 description: >-
-  Restore the latest GitLab backup into a throwaway stack, assert a clone
-  succeeds, then tear it down. Scheduled so the restore path is exercised on a
-  known cadence rather than discovered during an incident.
+  Restore the latest GitLab backup into a throwaway stack, assert git works, then
+  tear it down. Scheduled so the restore path is exercised on a known cadence
+  rather than discovered during an incident.
+
+  gitlab-backup does not include /etc/gitlab/gitlab-secrets.json or gitlab.rb, so
+  they are restored from a separate location first. Without the secrets file the
+  data restores cleanly and every encrypted value stays unreadable: CI variables,
+  two factor secrets, integration tokens and deploy keys. A drill that skips it
+  proves the wrong thing.
 assumeRole: '{{ AutomationAssumeRole }}'
 
 parameters:
@@ -12,15 +18,23 @@ parameters:
   BackupBucket:
     type: String
     description: Bucket holding gitlab-backup archives.
+  SecretsBucket:
+    type: String
+    description: Separate bucket holding gitlab-secrets.json and gitlab.rb.
   AmiId:
     type: String
-    description: Baked GitLab AMI to restore onto.
+    description: >-
+      Baked GitLab AMI. Its version must match the backup exactly, because a
+      backup only restores onto the same version and edition it came from.
   SubnetId:
     type: String
+    description: Subnet the throwaway instance runs in.
   SecurityGroupId:
     type: String
+    description: Security group for the throwaway instance.
   InstanceProfile:
     type: String
+    description: Instance profile granting read access to both buckets.
   NotificationTopic:
     type: String
     description: SNS topic that receives the drill result.
@@ -46,6 +60,41 @@ mainSteps:
             - Key: Ephemeral
               Value: 'true'
 
+  - name: AssertVersionMatches
+    action: aws:runCommand
+    timeoutSeconds: 600
+    onFailure: 'step:TerminateDrillInstance'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      InstanceIds:
+        - '{{ LaunchDrillInstance.InstanceIds }}'
+      Parameters:
+        commands:
+          - set -euo pipefail
+          - LATEST=$(aws s3 ls s3://{{ BackupBucket }}/ | sort -k1,2 | tail -1 | awk '{print $4}')
+          - test -n "$LATEST"
+          - echo "$LATEST" > /tmp/backup-name
+          - BACKUP_VERSION=$(echo "$LATEST" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          - INSTALLED=$(gitlab-rake gitlab:env:info 2>/dev/null | awk '/^GitLab information/{f=1} f && /Version:/{print $2; exit}')
+          - echo "backup=$BACKUP_VERSION installed=$INSTALLED"
+          - test "$BACKUP_VERSION" = "$INSTALLED"
+
+  - name: RestoreSecretsAndConfig
+    action: aws:runCommand
+    timeoutSeconds: 600
+    onFailure: 'step:TerminateDrillInstance'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      InstanceIds:
+        - '{{ LaunchDrillInstance.InstanceIds }}'
+      Parameters:
+        commands:
+          - set -euo pipefail
+          - aws s3 cp s3://{{ SecretsBucket }}/gitlab-secrets.json /etc/gitlab/gitlab-secrets.json
+          - aws s3 cp s3://{{ SecretsBucket }}/gitlab.rb /etc/gitlab/gitlab.rb
+          - chmod 0600 /etc/gitlab/gitlab-secrets.json /etc/gitlab/gitlab.rb
+          - gitlab-ctl reconfigure
+
   - name: RestoreBackup
     action: aws:runCommand
     timeoutSeconds: 5400
@@ -57,20 +106,19 @@ mainSteps:
       Parameters:
         commands:
           - set -euo pipefail
-          - LATEST=$(aws s3 ls s3://{{ BackupBucket }}/ | sort | tail -1 | awk '{print $4}')
-          - test -n "$LATEST"
+          - LATEST=$(cat /tmp/backup-name)
           - aws s3 cp "s3://{{ BackupBucket }}/$LATEST" /var/opt/gitlab/backups/
-          - chown git:git /var/opt/gitlab/backups/"$LATEST"
+          - chown git:git "/var/opt/gitlab/backups/$LATEST"
           - gitlab-ctl stop puma
           - gitlab-ctl stop sidekiq
-          - gitlab-backup restore force=yes BACKUP="${LATEST%%_gitlab_backup.tar}"
+          - gitlab-backup restore force=yes BACKUP="${LATEST%_gitlab_backup.tar}"
           - gitlab-ctl reconfigure
           - gitlab-ctl restart
           - gitlab-rake gitlab:check SANITIZE=true
 
-  - name: VerifyGitWorks
+  - name: VerifyGitAndSecrets
     action: aws:runCommand
-    timeoutSeconds: 600
+    timeoutSeconds: 900
     onFailure: 'step:TerminateDrillInstance'
     inputs:
       DocumentName: AWS-RunShellScript
@@ -80,6 +128,7 @@ mainSteps:
         commands:
           - set -euo pipefail
           - gitlab-rake gitlab:git:fsck
+          - gitlab-rake gitlab:doctor:secrets
           - PROJECT=$(gitlab-rails runner "puts Project.first&.full_path")
           - test -n "$PROJECT"
           - git clone "http://localhost/$PROJECT.git" /tmp/drill-clone

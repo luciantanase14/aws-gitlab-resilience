@@ -68,14 +68,18 @@ The composite alarm pages only when the git check and the host count are both in
 
 Upgrades become an image pipeline: bake an AMI at a pinned version, build and smoke test a staging stack, then instance refresh. Rollback is the previous AMI. The pipeline has to encode GitLab's required upgrade stops, because major versions cannot be skipped.
 
-`ssm/restore-drill.yml` restores the newest backup onto a throwaway instance, runs `gitlab:check` and `git:fsck`, clones a repository to prove the restore is usable, then terminates the instance. Failures route to termination rather than straight to notification, so a broken drill does not leave an instance running.
+`ssm/restore-drill.yml` restores onto a throwaway instance, then terminates it. Failures route to termination, so a broken drill does not leave an instance running.
+
+Two things it checks that a naive drill misses. `gitlab-backup` does not include `/etc/gitlab/gitlab-secrets.json` or `gitlab.rb`, and without the secrets file the data restores cleanly while every encrypted value stays unreadable: CI variables, two factor secrets, integration tokens, deploy keys. The drill restores them from a separate bucket first and runs `gitlab-rake gitlab:doctor:secrets` afterwards. It also asserts the AMI version matches the backup, because a backup only restores onto the version and edition it came from.
+
+`ssm/validate_document.py` runs in CI and checks the structure a YAML parse cannot: dangling or backwards `onFailure` targets, steps consuming outputs of steps that run later, and parameters referenced but never declared.
 
 The detail that decides where this lives: a recovery pipeline running as a GitLab CI job is unavailable exactly when GitLab is down. DR automation belongs in Systems Manager, triggered from outside GitLab. Everything else can stay in GitLab's own pipelines.
 
 ## Layout
 
 ```
-ssm/         restore-drill.yml
+ssm/         restore-drill.yml  validate_document.py
 monitoring/  alarms.tf
 canary/      git_protocol_canary.py
 ```
