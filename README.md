@@ -40,7 +40,17 @@ Stage 1 carries most of the benefit. Object storage moves to S3, Redis to Elasti
 
 Stage 2 removes that and costs three Gitaly nodes, a Praefect layer, and its own PostgreSQL.
 
-I would not start there. Praefect roughly doubles the components that can fail and that someone has to debug at three in the morning. A single Gitaly with frequent snapshots and a restore drill that actually runs usually gives better real availability per unit of effort than a cluster nobody has operated under pressure. Move to stage 2 when the measured RTO from stage 1 misses the target, not because the reference architecture says so.
+Targets stage 1 is designed to hit, not measurements:
+
+| | Target | What sets it |
+|---|---|---|
+| RPO | 1 hour | EBS snapshot interval on the repository volume |
+| RTO | 30 to 45 min | AMI boot, then restore of the repository volume |
+| Object data RPO | near zero | Artifacts and LFS live in S3, not on the instance |
+
+The restore drill is where those stop being guesses. It records how long each step took, so the RTO figure comes from the last run rather than from an estimate. If the drill reports 90 minutes, the number above is wrong and the design needs stage 2, not a better sentence.
+
+I would not start there. Praefect roughly triples the Gitaly footprint and doubles the components that can fail and that someone has to debug at three in the morning. A single Gitaly with frequent snapshots and a restore drill that actually runs usually gives better real availability per unit of effort than a cluster nobody has operated under pressure. Move to stage 2 when the measured RTO from stage 1 misses the target, not because the reference architecture says so.
 
 ## Monitoring
 
@@ -76,7 +86,7 @@ Two things it checks that a naive drill misses. `gitlab-backup` does not include
 
 The detail that decides where this lives: a recovery pipeline running as a GitLab CI job is unavailable exactly when GitLab is down. DR automation belongs in Systems Manager, triggered from outside GitLab. Everything else can stay in GitLab's own pipelines.
 
-## Layout
+## Running it
 
 ```
 ssm/         restore-drill.yml  validate_document.py

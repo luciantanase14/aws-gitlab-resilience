@@ -140,7 +140,7 @@ resource "aws_cloudwatch_metric_alarm" "database_connections" {
   }
 }
 
-# Pages only when git is failing and the fleet is unhealthy, so a single failed probe stays quiet.
+# both conditions, so one failed probe does not page anyone
 resource "aws_cloudwatch_composite_alarm" "service_down" {
   alarm_name        = "gitlab-service-down"
   alarm_description = "Git is unusable and the fleet is not serving"
